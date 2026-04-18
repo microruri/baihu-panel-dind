@@ -30,6 +30,7 @@ if [ "$ENABLE_DIND" = "true" ]; then
     
     # 设置 Docker 数据目录（避免与外层 Docker 冲突）
     export DOCKER_DATA_ROOT="${DOCKER_DATA_ROOT:-/var/lib/docker}"
+    export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
     
     # 启动 Docker Daemon
     log_info "Starting Docker Daemon..."
@@ -47,15 +48,25 @@ if [ "$ENABLE_DIND" = "true" ]; then
     
     # 等待 Docker Daemon 就绪
     log_info "Waiting for Docker Daemon to be ready..."
-    MAX_RETRIES=30
+    MAX_RETRIES="${DOCKER_START_RETRIES:-30}"
     RETRY_COUNT=0
     
-    while ! docker info > /dev/null 2>&1; do
+    while ! docker -H unix:///var/run/docker.sock info > /tmp/docker-info-check.log 2>&1; do
         RETRY_COUNT=$((RETRY_COUNT + 1))
+        if ! kill -0 "$DOCKER_PID" 2>/dev/null; then
+            log_error "Docker Daemon exited unexpectedly"
+            log_error "Last docker info check error:"
+            tail -20 /tmp/docker-info-check.log 2>/dev/null || true
+            log_error "Docker Daemon logs:"
+            tail -80 /var/log/dockerd.log
+            exit 1
+        fi
         if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
             log_error "Docker Daemon failed to start within 30 seconds"
+            log_error "Last docker info check error:"
+            tail -20 /tmp/docker-info-check.log 2>/dev/null || true
             log_error "Docker Daemon logs:"
-            tail -50 /var/log/dockerd.log
+            tail -80 /var/log/dockerd.log
             exit 1
         fi
         log_info "Waiting for Docker... ($RETRY_COUNT/$MAX_RETRIES)"
@@ -63,9 +74,9 @@ if [ "$ENABLE_DIND" = "true" ]; then
     done
     
     log_info "Docker Daemon is ready!"
-    docker version
+    docker -H unix:///var/run/docker.sock version
     log_info "Docker info:"
-    docker info | head -20
+    docker -H unix:///var/run/docker.sock info | head -20
 else
     log_info "DinD mode disabled, skipping Docker Daemon startup"
 fi
