@@ -30,6 +30,10 @@ env:
   IMAGE_NAME: microruri/baihu-panel-dind
   BAIHU_BASE: ghcr.io/engigu/baihu
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   detect-versions:
     runs-on: ubuntu-latest
