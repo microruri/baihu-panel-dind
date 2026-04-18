@@ -15,6 +15,11 @@ on:
         description: 'Manual version (e.g., 1.0.45 or v1.0.45)'
         required: false
         type: string
+      force_rebuild:
+        description: 'Force rebuild and overwrite tags'
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '0 2 * * *'
   push:
@@ -47,6 +52,8 @@ jobs:
       
       - name: Detect Baihu versions
         id: detect
+        env:
+          FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild == true }}
         run: |
           TAGS=("latest" "latest-debian13" "latest-minimal")
           MATRIX_ITEMS="[]"
@@ -108,12 +115,20 @@ jobs:
                 ;;
             esac
             
-            LOCAL_DIGEST=$(skopeo inspect docker://${REGISTRY}/${IMAGE_NAME}:${TAG} 2>/dev/null | jq -r '.Digest // empty' || echo "")
+            LOCAL_BASE_DIGEST=$(skopeo inspect docker://${REGISTRY}/${IMAGE_NAME}:${TAG} 2>/dev/null | jq -r '.Labels["org.opencontainers.image.base.digest"] // empty' || echo "")
             
             NEED_BUILD="false"
-            [ "$DIGEST" != "$LOCAL_DIGEST" ] || [ -z "$LOCAL_DIGEST" ] && NEED_BUILD="true"
+            if [ "${FORCE_REBUILD}" = "true" ]; then
+              NEED_BUILD="true"
+            elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+              NEED_BUILD="true"
+            elif [ -z "$LOCAL_BASE_DIGEST" ]; then
+              NEED_BUILD="true"
+            elif [ "$DIGEST" != "$LOCAL_BASE_DIGEST" ]; then
+              NEED_BUILD="true"
+            fi
             
-            echo "Tag: ${TAG}, VersionTag: ${VERSION_TAG}, Need Build: ${NEED_BUILD}"
+            echo "Tag: ${TAG}, VersionTag: ${VERSION_TAG}, Need Build: ${NEED_BUILD}, BaseDigest: ${DIGEST}, LocalBaseDigest: ${LOCAL_BASE_DIGEST:-none}"
             
             MATRIX_ITEMS=$(echo "$MATRIX_ITEMS" | jq -c \
               --arg tag "$TAG" \
@@ -169,6 +184,9 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}
+          labels: |
+            org.opencontainers.image.base.name=${{ env.BAIHU_BASE }}:${{ matrix.tag }}
+            org.opencontainers.image.base.digest=${{ matrix.digest }}
           build-args: BAIHU_VERSION=${{ matrix.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -227,6 +245,7 @@ jobs:
               echo "::endgroup::"
               continue
             fi
+            UPSTREAM_DIGEST=$(skopeo inspect docker://${BAIHU_BASE}:${UPSTREAM_TAG} | jq -r '.Digest // empty')
 
             case "${SUFFIX}" in
               "")
@@ -249,6 +268,8 @@ jobs:
               --platform linux/amd64,linux/arm64 \
               --push \
               -t ${REGISTRY}/${IMAGE_NAME}:${TAG} \
+              --label org.opencontainers.image.base.name=${BAIHU_BASE}:${UPSTREAM_TAG} \
+              --label org.opencontainers.image.base.digest=${UPSTREAM_DIGEST} \
               --build-arg BAIHU_VERSION=${UPSTREAM_TAG} \
               .
             
