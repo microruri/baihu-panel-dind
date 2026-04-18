@@ -60,21 +60,7 @@ jobs:
           
           for TAG in "${TAGS[@]}"; do
             echo "::group::Checking ${TAG}"
-
-            case "${TAG}" in
-              latest)
-                DOCKERFILE="docker/Dockerfile"
-                ;;
-              latest-debian13)
-                DOCKERFILE="docker/Dockerfile.debian13"
-                ;;
-              latest-minimal)
-                DOCKERFILE="docker/Dockerfile.minimal"
-                ;;
-              *)
-                DOCKERFILE="docker/Dockerfile"
-                ;;
-            esac
+            DOCKERFILE="docker/Dockerfile"
             
             INSPECT_OUTPUT=$(skopeo inspect docker://${BAIHU_BASE}:${TAG} 2>&1)
             
@@ -246,21 +232,7 @@ jobs:
               continue
             fi
             UPSTREAM_DIGEST=$(skopeo inspect docker://${BAIHU_BASE}:${UPSTREAM_TAG} | jq -r '.Digest // empty')
-
-            case "${SUFFIX}" in
-              "")
-                DOCKERFILE="docker/Dockerfile"
-                ;;
-              "-debian13")
-                DOCKERFILE="docker/Dockerfile.debian13"
-                ;;
-              "-minimal")
-                DOCKERFILE="docker/Dockerfile.minimal"
-                ;;
-              *)
-                DOCKERFILE="docker/Dockerfile"
-                ;;
-            esac
+            DOCKERFILE="docker/Dockerfile"
             echo "Using Dockerfile: ${DOCKERFILE}"
             
             docker buildx build \

@@ -1,109 +1,64 @@
-#!/bin/bash
-# Baihu Panel DinD Entrypoint
-# 启动 Docker Daemon 并运行 Baihu 主进程
+#!/usr/bin/env bash
+set -euo pipefail
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 
-set -e
+export MISE_HIDE_UPDATE_WARNING=1
 
-# 颜色输出
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+COLOR_PREFIX="\033[1;36m[Entrypoint]\033[0m"
+log() {
+  printf "${COLOR_PREFIX} %s\n" "$1"
 }
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+DOCKER_DATA_ROOT="${DOCKER_DATA_ROOT:-/var/lib/docker}"
+DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+DOCKER_START_TIMEOUT="${DOCKER_START_TIMEOUT:-30}"
+APP_DIR="${APP_DIR:-/app}"
+APP_ENTRY="${APP_ENTRY:-server.js}"
+
+export DOCKER_HOST
+export DOCKER_TLS_CERTDIR="${DOCKER_TLS_CERTDIR:-}"
+
+mkdir -p /var/log "${DOCKER_DATA_ROOT}"
+
+log "starting dockerd..."
+dockerd \
+  --data-root="${DOCKER_DATA_ROOT}" \
+  --host=unix:///var/run/docker.sock \
+  > /var/log/dockerd.log 2>&1 &
+
+dockerd_pid=$!
+
+cleanup() {
+  if kill -0 "${dockerd_pid}" 2>/dev/null; then
+    log "stopping dockerd (pid=${dockerd_pid})..."
+    kill "${dockerd_pid}" 2>/dev/null || true
+    wait "${dockerd_pid}" 2>/dev/null || true
+  fi
 }
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+trap cleanup EXIT INT TERM
 
-# 检查是否启用了 DinD（通过环境变量控制）
-ENABLE_DIND="${ENABLE_DIND:-true}"
-
-if [ "$ENABLE_DIND" = "true" ]; then
-    log_info "Starting Docker-in-Docker mode..."
-    
-    # 设置 Docker 数据目录（避免与外层 Docker 冲突）
-    export DOCKER_DATA_ROOT="${DOCKER_DATA_ROOT:-/var/lib/docker}"
-    export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
-    
-    # 启动 Docker Daemon
-    log_info "Starting Docker Daemon..."
-    dockerd \
-        --data-root="$DOCKER_DATA_ROOT" \
-        --host=unix:///var/run/docker.sock \
-        --host=tcp://127.0.0.1:2375 \
-        --tls=false \
-        --storage-driver=overlay2 \
-        --userns-remap="" \
-        > /var/log/dockerd.log 2>&1 &
-    
-    DOCKER_PID=$!
-    log_info "Docker Daemon started with PID: $DOCKER_PID"
-    
-    # 等待 Docker Daemon 就绪
-    log_info "Waiting for Docker Daemon to be ready..."
-    MAX_RETRIES="${DOCKER_START_RETRIES:-30}"
-    RETRY_COUNT=0
-    
-    while ! docker -H unix:///var/run/docker.sock info > /tmp/docker-info-check.log 2>&1; do
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        if ! kill -0 "$DOCKER_PID" 2>/dev/null; then
-            log_error "Docker Daemon exited unexpectedly"
-            log_error "Last docker info check error:"
-            tail -20 /tmp/docker-info-check.log 2>/dev/null || true
-            log_error "Docker Daemon logs:"
-            tail -80 /var/log/dockerd.log
-            exit 1
-        fi
-        if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-            log_error "Docker Daemon failed to start within 30 seconds"
-            log_error "Last docker info check error:"
-            tail -20 /tmp/docker-info-check.log 2>/dev/null || true
-            log_error "Docker Daemon logs:"
-            tail -80 /var/log/dockerd.log
-            exit 1
-        fi
-        log_info "Waiting for Docker... ($RETRY_COUNT/$MAX_RETRIES)"
-        sleep 1
-    done
-    
-    log_info "Docker Daemon is ready!"
-    docker -H unix:///var/run/docker.sock version
-    log_info "Docker info:"
-    docker -H unix:///var/run/docker.sock info | head -20
-else
-    log_info "DinD mode disabled, skipping Docker Daemon startup"
-fi
-
-# 如果挂载了 docker.sock（DooD 模式），检查是否可用
-if [ -S /var/run/docker.sock ]; then
-    if docker ps > /dev/null 2>&1; then
-        log_info "External Docker socket detected and working (DooD mode)"
-    fi
-fi
-
-# 运行初始化脚本（如果存在）
-if [ -f /app/init.sh ]; then
-    log_info "Running initialization script..."
-    /app/init.sh
-fi
-
-# 启动 Baihu 主进程
-log_info "Starting Baihu Panel..."
-log_info "Baihu version: $(cat /app/VERSION 2>/dev/null || echo 'unknown')"
-
-# 使用 exec 替换当前进程，确保信号正确传递
-if [ -f /app/baihu ]; then
-    exec /app/baihu
-elif command -v baihu &> /dev/null; then
-    exec baihu
-else
-    log_error "Baihu binary not found!"
+log "waiting for dockerd to be ready..."
+start_ts="$(date +%s)"
+while ! docker info >/dev/null 2>/tmp/docker-start-check.log; do
+  if ! kill -0 "${dockerd_pid}" 2>/dev/null; then
+    log "dockerd exited unexpectedly"
+    tail -n 100 /var/log/dockerd.log || true
+    tail -n 50 /tmp/docker-start-check.log || true
     exit 1
-fi
+  fi
+
+  now_ts="$(date +%s)"
+  if [ $((now_ts - start_ts)) -ge "${DOCKER_START_TIMEOUT}" ]; then
+    log "dockerd did not become ready in ${DOCKER_START_TIMEOUT}s"
+    tail -n 100 /var/log/dockerd.log || true
+    tail -n 50 /tmp/docker-start-check.log || true
+    exit 1
+  fi
+  sleep 1
+done
+
+log "dockerd is ready"
+
+bash /app/docker-entrypoint.sh

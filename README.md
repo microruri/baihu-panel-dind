@@ -38,8 +38,8 @@ cd baihu-panel-dind
 docker build -f docker/Dockerfile -t baihu-panel-dind:local .
 
 # 基于特定版本构建
-docker build -f docker/Dockerfile.debian13 --build-arg BAIHU_VERSION=latest-debian13 -t baihu-panel-dind:debian13 .
-docker build -f docker/Dockerfile.minimal --build-arg BAIHU_VERSION=latest-minimal -t baihu-panel-dind:minimal .
+docker build -f docker/Dockerfile --build-arg BAIHU_VERSION=latest-debian13 -t baihu-panel-dind:debian13 .
+docker build -f docker/Dockerfile --build-arg BAIHU_VERSION=latest-minimal -t baihu-panel-dind:minimal .
 ```
 
 ## 相关项目
