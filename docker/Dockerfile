@@ -35,7 +35,7 @@ RUN set -eux; \
     apt-get clean
 
 # 创建 DinD 启动脚本
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # 创建 Docker 数据目录

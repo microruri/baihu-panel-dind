@@ -22,7 +22,6 @@ on:
       - main
     paths:
       - 'docker/**'
-      - 'entrypoint.sh'
       - '.github/workflows/build.yml'
 
 env:

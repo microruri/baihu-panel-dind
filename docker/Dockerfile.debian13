@@ -32,7 +32,7 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     apt-get clean
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 RUN mkdir -p /var/lib/docker /var/run/docker-runtime
