@@ -21,7 +21,7 @@ on:
     branches:
       - main
     paths:
-      - 'Dockerfile'
+      - 'docker/**'
       - 'docker-entrypoint.sh'
       - '.github/workflows/build.yml'
 
@@ -54,6 +54,21 @@ jobs:
           
           for TAG in "${TAGS[@]}"; do
             echo "::group::Checking ${TAG}"
+
+            case "${TAG}" in
+              latest)
+                DOCKERFILE="docker/Dockerfile"
+                ;;
+              latest-debian13)
+                DOCKERFILE="docker/Dockerfile.debian13"
+                ;;
+              latest-minimal)
+                DOCKERFILE="docker/Dockerfile.minimal"
+                ;;
+              *)
+                DOCKERFILE="docker/Dockerfile"
+                ;;
+            esac
             
             INSPECT_OUTPUT=$(skopeo inspect docker://${BAIHU_BASE}:${TAG} 2>&1)
             
@@ -85,8 +100,9 @@ jobs:
               --arg tag "$TAG" \
               --arg version "$VERSION" \
               --arg digest "$DIGEST" \
+              --arg dockerfile "$DOCKERFILE" \
               --arg need_build "$NEED_BUILD" \
-              '. + [{"tag": $tag, "version": $version, "digest": $digest, "need_build": ($need_build == "true")}]')
+              '. + [{"tag": $tag, "version": $version, "digest": $digest, "dockerfile": $dockerfile, "need_build": ($need_build == "true")}]')
             
             echo "::endgroup::"
           done
@@ -127,6 +143,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           tags: |
@@ -189,8 +206,25 @@ jobs:
               echo "::endgroup::"
               continue
             fi
+
+            case "${SUFFIX}" in
+              "")
+                DOCKERFILE="docker/Dockerfile"
+                ;;
+              "-debian13")
+                DOCKERFILE="docker/Dockerfile.debian13"
+                ;;
+              "-minimal")
+                DOCKERFILE="docker/Dockerfile.minimal"
+                ;;
+              *)
+                DOCKERFILE="docker/Dockerfile"
+                ;;
+            esac
+            echo "Using Dockerfile: ${DOCKERFILE}"
             
             docker buildx build \
+              -f ${DOCKERFILE} \
               --platform linux/amd64 \
               --push \
               -t ${REGISTRY}/${IMAGE_NAME}:${TAG} \

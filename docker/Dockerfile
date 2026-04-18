@@ -12,25 +12,27 @@ LABEL org.opencontainers.image.source="https://github.com/microruri/baihu-panel-
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DOCKER_TLS_CERTDIR=""
 
-# 安装 Docker 及相关工具
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    docker.io \
-    docker-compose \
-    docker-buildx-plugin \
-    ca-certificates \
-    curl \
-    gnupg \
-    lsb-release \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
-# 安装 Docker CLI 补充工具（可选）
-RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
-    && apt-get update \
-    && apt-get install -y docker-ce-cli docker-compose-plugin \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# 安装 Docker 及相关工具（兼容不同 Debian 发行版的软件包命名）
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        docker.io \
+        docker-compose \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release; \
+    if apt-cache show docker-buildx-plugin >/dev/null 2>&1; then \
+        apt-get install -y --no-install-recommends docker-buildx-plugin; \
+    elif apt-cache show docker-buildx >/dev/null 2>&1; then \
+        apt-get install -y --no-install-recommends docker-buildx; \
+    elif apt-cache show moby-buildx >/dev/null 2>&1; then \
+        apt-get install -y --no-install-recommends moby-buildx; \
+    else \
+        echo "No buildx package found in current apt repositories; skip install."; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get clean
 
 # 创建 DinD 启动脚本
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
