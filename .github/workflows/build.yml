@@ -3,14 +3,6 @@ name: Build Baihu DinD Images
 on:
   workflow_dispatch:
     inputs:
-      build_type:
-        description: 'Build type'
-        required: true
-        default: 'auto'
-        type: choice
-        options:
-          - auto
-          - manual
       manual_version:
         description: 'Manual version (e.g., 1.0.45 or v1.0.45)'
         required: false
@@ -39,10 +31,11 @@ permissions:
   packages: read
 
 jobs:
-  detect-versions:
+  collect-versions:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.detect.outputs.matrix }}
+      matrix: ${{ steps.collect.outputs.matrix }}
+      has_build: ${{ steps.collect.outputs.has_build }}
     steps:
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y jq skopeo
@@ -50,101 +43,259 @@ jobs:
       - name: Login to GHCR for inspection
         run: echo ${{ secrets.GITHUB_TOKEN }} | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
       
-      - name: Detect Baihu versions
-        id: detect
+      - name: Collect versions and build matrix
+        id: collect
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_VERSION_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.manual_version || '' }}
           FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild == true }}
         run: |
-          TAGS=("latest" "latest-debian13" "latest-minimal")
-          MATRIX_ITEMS="[]"
-          
-          for TAG in "${TAGS[@]}"; do
-            echo "::group::Checking ${TAG}"
-            DOCKERFILE="docker/Dockerfile"
-            
-            INSPECT_OUTPUT=$(skopeo inspect docker://${BAIHU_BASE}:${TAG} 2>&1)
-            
-            if ! echo "$INSPECT_OUTPUT" | jq -e '.Digest' > /dev/null 2>&1; then
-              echo "::warning::Failed to inspect ${TAG}"
-              echo "::endgroup::"
-              continue
-            fi
-            
-            DIGEST=$(echo "$INSPECT_OUTPUT" | jq -r '.Digest')
-            VERSION=$(echo "$INSPECT_OUTPUT" | jq -r '.Labels["org.opencontainers.image.version"] // .Labels["version"] // empty')
-            
-            if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
-              VERSION=$(curl -s "https://api.github.com/repos/engigu/baihu-panel/releases/latest" | jq -r '.tag_name // empty' 2>/dev/null || echo "")
-            fi
-            
-            if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
-              VERSION="$(date +%Y%m%d)-$(echo $DIGEST | cut -c1-7)"
-            fi
+          set -euo pipefail
 
-            VERSION_BASE="${VERSION#v}"
-            VERSION_BASE="${VERSION_BASE#V}"
-            VERSION_BASE="${VERSION_BASE%-debian13}"
-            VERSION_BASE="${VERSION_BASE%-minimal}"
+          MATRIX_ITEMS='[]'
+          RELEASE_VERSION_BASE=""
 
-            case "${TAG}" in
-              latest)
-                VERSION_TAG="${VERSION_BASE}"
-                ;;
-              latest-debian13)
-                VERSION_TAG="${VERSION_BASE}-debian13"
-                ;;
-              latest-minimal)
-                VERSION_TAG="${VERSION_BASE}-minimal"
-                ;;
-              *)
-                VERSION_TAG="${VERSION_BASE}"
-                ;;
+          normalize_version_base() {
+            local value="${1:-}"
+            value="${value#v}"
+            value="${value#V}"
+            value="${value%-debian13}"
+            value="${value%-minimal}"
+            printf '%s\n' "${value}"
+          }
+
+          suffix_for_floating_tag() {
+            case "${1}" in
+              latest) printf '%s\n' "" ;;
+              latest-debian13) printf '%s\n' "-debian13" ;;
+              latest-minimal) printf '%s\n' "-minimal" ;;
+              *) printf '%s\n' "" ;;
             esac
-            
-            LOCAL_BASE_DIGEST=$(skopeo inspect docker://${REGISTRY}/${IMAGE_NAME}:${TAG} 2>/dev/null | jq -r '.Labels["org.opencontainers.image.base.digest"] // empty' || echo "")
-            
-            NEED_BUILD="false"
-            if [ "${FORCE_REBUILD}" = "true" ]; then
-              NEED_BUILD="true"
-            elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-              NEED_BUILD="true"
-            elif [ -z "$LOCAL_BASE_DIGEST" ]; then
-              NEED_BUILD="true"
-            elif [ "$DIGEST" != "$LOCAL_BASE_DIGEST" ]; then
-              NEED_BUILD="true"
+          }
+
+          version_tag_from_base_and_suffix() {
+            local base="${1:-}"
+            local suffix="${2:-}"
+            if [ -z "${base}" ]; then
+              printf '%s\n' ""
+              return
             fi
-            
-            echo "Tag: ${TAG}, VersionTag: ${VERSION_TAG}, Need Build: ${NEED_BUILD}, BaseDigest: ${DIGEST}, LocalBaseDigest: ${LOCAL_BASE_DIGEST:-none}"
-            
-            MATRIX_ITEMS=$(echo "$MATRIX_ITEMS" | jq -c \
-              --arg tag "$TAG" \
-              --arg version "$VERSION_TAG" \
-              --arg version_base "$VERSION_BASE" \
-              --arg digest "$DIGEST" \
-              --arg dockerfile "$DOCKERFILE" \
-              --arg need_build "$NEED_BUILD" \
-              '. + [{"tag": $tag, "version": $version, "version_base": $version_base, "digest": $digest, "dockerfile": $dockerfile, "need_build": ($need_build == "true")}]')
-            
-            echo "::endgroup::"
-          done
-          
-          echo "matrix=${MATRIX_ITEMS}" >> $GITHUB_OUTPUT
-          echo "$MATRIX_ITEMS" | jq .
+            printf '%s\n' "${base}${suffix}"
+          }
+
+          version_from_json() {
+            local json="${1}"
+            jq -r '.Labels["org.opencontainers.image.version"] // .Labels["version"] // empty' <<< "${json}"
+          }
+
+          digest_from_json() {
+            local json="${1}"
+            jq -r '.Digest // empty' <<< "${json}"
+          }
+
+          inspect_image_json() {
+            local ref="${1}"
+            local out=""
+            if out="$(skopeo inspect "docker://${ref}" 2>/dev/null)"; then
+              printf '%s\n' "${out}"
+              return 0
+            fi
+            return 1
+          }
+
+          get_release_version_base() {
+            if [ -n "${RELEASE_VERSION_BASE}" ]; then
+              printf '%s\n' "${RELEASE_VERSION_BASE}"
+              return
+            fi
+            local release_tag=""
+            release_tag="$(curl -fsSL "https://api.github.com/repos/engigu/baihu-panel/releases/latest" | jq -r '.tag_name // empty' 2>/dev/null || true)"
+            RELEASE_VERSION_BASE="$(normalize_version_base "${release_tag}")"
+            printf '%s\n' "${RELEASE_VERSION_BASE}"
+          }
+
+          append_item() {
+            local variant="${1}"
+            local floating_tag="${2}"
+            local version_tag="${3}"
+            local upstream_tag="${4}"
+            local version_base="${5}"
+            local digest="${6}"
+            local need_build="${7}"
+            local reason="${8}"
+
+            MATRIX_ITEMS=$(echo "${MATRIX_ITEMS}" | jq -c \
+              --arg variant "${variant}" \
+              --arg floating_tag "${floating_tag}" \
+              --arg version_tag "${version_tag}" \
+              --arg upstream_tag "${upstream_tag}" \
+              --arg version_base "${version_base}" \
+              --arg digest "${digest}" \
+              --arg need_build "${need_build}" \
+              --arg reason "${reason}" \
+              '. + [{
+                "variant": $variant,
+                "floating_tag": $floating_tag,
+                "version_tag": $version_tag,
+                "upstream_tag": $upstream_tag,
+                "version_base": $version_base,
+                "digest": $digest,
+                "need_build": ($need_build == "true"),
+                "reason": $reason
+              }]')
+          }
+
+          collect_auto_variants() {
+            local floating_tag=""
+            local suffix=""
+            local upstream_json=""
+            local upstream_digest=""
+            local upstream_version_raw=""
+            local upstream_version_base=""
+            local local_json=""
+            local local_exists=""
+            local local_version_raw=""
+            local local_version_base=""
+            local version_tag=""
+            local need_build=""
+            local reason=""
+
+            for floating_tag in latest latest-debian13 latest-minimal; do
+              suffix="$(suffix_for_floating_tag "${floating_tag}")"
+              echo "::group::Collect ${floating_tag}"
+
+              if ! upstream_json="$(inspect_image_json "${BAIHU_BASE}:${floating_tag}")"; then
+                append_item "${floating_tag}" "${floating_tag}" "" "" "" "" "false" "upstream_floating_missing"
+                echo "::warning::Upstream tag missing: ${floating_tag}"
+                echo "::endgroup::"
+                continue
+              fi
+
+              upstream_digest="$(digest_from_json "${upstream_json}")"
+              upstream_version_raw="$(version_from_json "${upstream_json}")"
+              upstream_version_base="$(normalize_version_base "${upstream_version_raw}")"
+              if [ -z "${upstream_version_base}" ]; then
+                upstream_version_base="$(get_release_version_base)"
+              fi
+              version_tag="$(version_tag_from_base_and_suffix "${upstream_version_base}" "${suffix}")"
+
+              local_exists="false"
+              local_version_base=""
+              if local_json="$(inspect_image_json "${REGISTRY}/${IMAGE_NAME}:${floating_tag}")"; then
+                local_exists="true"
+                local_version_raw="$(version_from_json "${local_json}")"
+                local_version_base="$(normalize_version_base "${local_version_raw}")"
+              fi
+
+              need_build="false"
+              reason="version_unchanged"
+              if [ "${FORCE_REBUILD}" = "true" ]; then
+                need_build="true"
+                reason="force_rebuild"
+              elif [ "${EVENT_NAME}" = "push" ]; then
+                need_build="true"
+                reason="push_trigger"
+              elif [ -z "${version_tag}" ]; then
+                need_build="false"
+                reason="upstream_version_unresolved"
+              elif [ "${local_exists}" != "true" ]; then
+                need_build="true"
+                reason="local_floating_missing"
+              elif [ -z "${local_version_base}" ]; then
+                need_build="true"
+                reason="local_version_unresolved"
+              elif [ "${upstream_version_base}" != "${local_version_base}" ]; then
+                need_build="true"
+                reason="upstream_version_changed"
+              fi
+
+              append_item "${floating_tag}" "${floating_tag}" "${version_tag}" "${floating_tag}" "${upstream_version_base}" "${upstream_digest}" "${need_build}" "${reason}"
+              echo "version_tag=${version_tag} need_build=${need_build} reason=${reason}"
+              echo "::endgroup::"
+            done
+          }
+
+          collect_manual_variants() {
+            local manual_version_base=""
+            local suffix=""
+            local version_tag=""
+            local upstream_tag=""
+            local upstream_json=""
+            local upstream_digest=""
+            local need_build=""
+            local reason=""
+
+            manual_version_base="$(normalize_version_base "${MANUAL_VERSION_INPUT}")"
+            if [ -z "${manual_version_base}" ]; then
+              echo "::error::Invalid manual_version: ${MANUAL_VERSION_INPUT}"
+              exit 1
+            fi
+
+            for suffix in "" "-debian13" "-minimal"; do
+              version_tag="${manual_version_base}${suffix}"
+              echo "::group::Collect manual ${version_tag}"
+              upstream_tag=""
+
+              if inspect_image_json "${BAIHU_BASE}:v${manual_version_base}${suffix}" >/dev/null; then
+                upstream_tag="v${manual_version_base}${suffix}"
+              elif inspect_image_json "${BAIHU_BASE}:${manual_version_base}${suffix}" >/dev/null; then
+                upstream_tag="${manual_version_base}${suffix}"
+              fi
+
+              if [ -z "${upstream_tag}" ]; then
+                append_item "${version_tag}" "" "${version_tag}" "" "${manual_version_base}" "" "false" "upstream_version_tag_not_found"
+                echo "::warning::Upstream manual tag missing for ${version_tag}"
+                echo "::endgroup::"
+                continue
+              fi
+
+              upstream_json="$(inspect_image_json "${BAIHU_BASE}:${upstream_tag}")"
+              upstream_digest="$(digest_from_json "${upstream_json}")"
+
+              if [ "${FORCE_REBUILD}" = "true" ]; then
+                need_build="true"
+                reason="manual_force_rebuild"
+              elif inspect_image_json "${REGISTRY}/${IMAGE_NAME}:${version_tag}" >/dev/null; then
+                need_build="false"
+                reason="already_published"
+              else
+                need_build="true"
+                reason="manual_version_missing_locally"
+              fi
+
+              append_item "${version_tag}" "" "${version_tag}" "${upstream_tag}" "${manual_version_base}" "${upstream_digest}" "${need_build}" "${reason}"
+              echo "upstream_tag=${upstream_tag} need_build=${need_build} reason=${reason}"
+              echo "::endgroup::"
+            done
+          }
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${MANUAL_VERSION_INPUT}" ]; then
+            collect_manual_variants
+          else
+            collect_auto_variants
+          fi
+
+          HAS_BUILD="$(echo "${MATRIX_ITEMS}" | jq -r 'any(.[]; .need_build == true)')"
+          echo "matrix=${MATRIX_ITEMS}" >> "${GITHUB_OUTPUT}"
+          echo "has_build=${HAS_BUILD}" >> "${GITHUB_OUTPUT}"
+          echo "${MATRIX_ITEMS}" | jq .
       
       - name: Summary
         run: |
-          echo "| Tag | Version | Need Build |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|---------|------------|" >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.detect.outputs.matrix }}' | jq -r '.[] | "| \(.tag) | \(.version) | \(.need_build) |"' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "| Variant | Floating Tag | Version Tag | Upstream Tag | Need Build | Reason |"
+            echo "|---------|--------------|-------------|--------------|------------|--------|"
+            echo '${{ steps.collect.outputs.matrix }}' | jq -r '.[] | "| \(.variant) | \(.floating_tag) | \(.version_tag) | \(.upstream_tag) | \(.need_build) | \(.reason) |"'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   build:
-    needs: detect-versions
-    if: contains(needs.detect-versions.outputs.matrix, 'true')
+    needs: collect-versions
+    if: needs.collect-versions.outputs.has_build == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.detect-versions.outputs.matrix) }}
+        include: ${{ fromJson(needs.collect-versions.outputs.matrix) }}
     steps:
       - name: Skip if no build needed
         if: matrix.need_build == false
@@ -161,97 +312,48 @@ jobs:
           password: ${{ secrets.DOCKER_TOKEN }}
       
       - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}
-          labels: |
-            org.opencontainers.image.base.name=${{ env.BAIHU_BASE }}:${{ matrix.tag }}
-            org.opencontainers.image.base.digest=${{ matrix.digest }}
-          build-args: BAIHU_VERSION=${{ matrix.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      
-      - name: Summary
+        env:
+          FLOATING_TAG: ${{ matrix.floating_tag }}
+          VERSION_TAG: ${{ matrix.version_tag }}
+          UPSTREAM_TAG: ${{ matrix.upstream_tag }}
+          UPSTREAM_DIGEST: ${{ matrix.digest }}
         run: |
-          echo "## Built ${{ matrix.tag }} ✅" >> $GITHUB_STEP_SUMMARY
-          echo "- Version: ${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+          TAGS=("${REGISTRY}/${IMAGE_NAME}:${VERSION_TAG}")
+          if [ -n "${FLOATING_TAG}" ]; then
+            TAGS+=("${REGISTRY}/${IMAGE_NAME}:${FLOATING_TAG}")
+          fi
 
-  manual-build:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'manual' && inputs.manual_version != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: docker/setup-buildx-action@v3
-      
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
-      
-      - name: Login to GHCR
-        run: echo ${{ secrets.GITHUB_TOKEN }} | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
-      
-      - name: Build version
-        id: version
-        run: |
-          VERSION="${{ inputs.manual_version }}"
-          VERSION="${VERSION#v}"
-          VERSION="${VERSION#V}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Building: ${VERSION}"
-      
-      - name: Build all variants
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          VARIANTS=("" "-debian13" "-minimal")
-          
-          for SUFFIX in "${VARIANTS[@]}"; do
-            TAG="${VERSION}${SUFFIX}"
-            echo "::group::Building ${TAG}"
-            
-            if skopeo inspect docker://${BAIHU_BASE}:v${VERSION}${SUFFIX} > /dev/null 2>&1; then
-              UPSTREAM_TAG="v${VERSION}${SUFFIX}"
-              echo "Using upstream tag: ${UPSTREAM_TAG}"
-            elif skopeo inspect docker://${BAIHU_BASE}:${VERSION}${SUFFIX} > /dev/null 2>&1; then
-              UPSTREAM_TAG="${VERSION}${SUFFIX}"
-              echo "Using upstream tag: ${UPSTREAM_TAG}"
-            elif skopeo inspect docker://${BAIHU_BASE}:latest${SUFFIX} > /dev/null 2>&1; then
-              UPSTREAM_TAG="latest${SUFFIX}"
-              echo "Using upstream tag: ${UPSTREAM_TAG}"
-            else
-              echo "::warning::Upstream not found for ${TAG}"
-              echo "::endgroup::"
-              continue
-            fi
-            UPSTREAM_DIGEST=$(skopeo inspect docker://${BAIHU_BASE}:${UPSTREAM_TAG} | jq -r '.Digest // empty')
-            DOCKERFILE="docker/Dockerfile"
-            echo "Using Dockerfile: ${DOCKERFILE}"
-            
-            docker buildx build \
-              -f ${DOCKERFILE} \
-              --platform linux/amd64,linux/arm64 \
-              --push \
-              -t ${REGISTRY}/${IMAGE_NAME}:${TAG} \
-              --label org.opencontainers.image.base.name=${BAIHU_BASE}:${UPSTREAM_TAG} \
-              --label org.opencontainers.image.base.digest=${UPSTREAM_DIGEST} \
-              --build-arg BAIHU_VERSION=${UPSTREAM_TAG} \
-              .
-            
-            echo "::endgroup::"
+          BUILD_CMD=(
+            docker buildx build
+            -f docker/Dockerfile
+            --platform "linux/amd64,linux/arm64"
+            --push
+            --label "org.opencontainers.image.base.name=${BAIHU_BASE}:${UPSTREAM_TAG}"
+            --label "org.opencontainers.image.base.digest=${UPSTREAM_DIGEST}"
+            --label "org.opencontainers.image.version=${VERSION_TAG}"
+            --label "version=${VERSION_TAG}"
+            --build-arg "BAIHU_VERSION=${UPSTREAM_TAG}"
+            --cache-from "type=gha"
+            --cache-to "type=gha,mode=max"
+          )
+
+          for tag in "${TAGS[@]}"; do
+            BUILD_CMD+=(-t "${tag}")
           done
+          BUILD_CMD+=(.)
+          "${BUILD_CMD[@]}"
       
       - name: Summary
+        env:
+          FLOATING_TAG: ${{ matrix.floating_tag }}
+          VERSION_TAG: ${{ matrix.version_tag }}
+          UPSTREAM_TAG: ${{ matrix.upstream_tag }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          echo "## Manual Build ✅" >> $GITHUB_STEP_SUMMARY
-          echo "- ${REGISTRY}/${IMAGE_NAME}:${VERSION}" >> $GITHUB_STEP_SUMMARY
-          echo "- ${REGISTRY}/${IMAGE_NAME}:${VERSION}-debian13" >> $GITHUB_STEP_SUMMARY
-          echo "- ${REGISTRY}/${IMAGE_NAME}:${VERSION}-minimal" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Built ${VERSION_TAG} ✅"
+            echo "- Upstream: ${UPSTREAM_TAG}"
+            if [ -n "${FLOATING_TAG}" ]; then
+              echo "- Floating tag: ${FLOATING_TAG}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
