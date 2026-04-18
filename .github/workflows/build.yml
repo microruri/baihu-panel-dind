@@ -37,119 +37,64 @@ jobs:
       matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq skopeo
+        run: sudo apt-get update && sudo apt-get install -y jq skopeo
+      
+      - name: Login to GHCR for inspection
+        run: echo ${{ secrets.GITHUB_TOKEN }} | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
       
       - name: Detect Baihu versions
         id: detect
         run: |
           TAGS=("latest" "latest-debian13" "latest-minimal")
-          ARCHS=("linux/amd64" "linux/arm64")
-          
           MATRIX_ITEMS="[]"
           
           for TAG in "${TAGS[@]}"; do
-            for ARCH in "${ARCHS[@]}"; do
-              echo "::group::Checking ${TAG} (${ARCH})"
-              
-              ARCH_SUFFIX=$(echo $ARCH | sed 's|linux/||')
-              
-              REMOTE_INFO=$(skopeo inspect \
-                --raw \
-                --override-os linux \
-                --override-arch ${ARCH_SUFFIX} \
-                docker://${BAIHU_BASE}:${TAG} 2>/dev/null || echo "{}")
-              
-              if echo "$REMOTE_INFO" | jq -e '.manifests' > /dev/null 2>&1; then
-                DIGEST=$(echo "$REMOTE_INFO" | jq -r --arg arch "$ARCH" \
-                  '.manifests[] | select(.platform.architecture == $arch) | .digest // empty' | head -1)
-                
-                if [ -z "$DIGEST" ] || [ "$DIGEST" == "null" ]; then
-                  echo "::warning::No manifest found for ${TAG} ${ARCH}"
-                  continue
-                fi
-              else
-                DIGEST=$(skopeo inspect \
-                  --override-os linux \
-                  --override-arch ${ARCH_SUFFIX} \
-                  docker://${BAIHU_BASE}:${TAG} 2>/dev/null | jq -r '.Digest // empty')
-                
-                if [ -z "$DIGEST" ] || [ "$DIGEST" == "null" ]; then
-                  echo "::warning::Failed to get digest for ${TAG} ${ARCH}"
-                  continue
-                fi
-              fi
-              
-              VERSION=$(skopeo inspect \
-                --override-os linux \
-                --override-arch ${ARCH_SUFFIX} \
-                docker://${BAIHU_BASE}:${TAG} 2>/dev/null | \
-                jq -r '.Labels["org.opencontainers.image.version"] // .Labels["version"] // empty')
-              
-              if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
-                VERSION=$(curl -s "https://api.github.com/repos/engigu/baihu-panel/releases/latest" | \
-                  jq -r '.tag_name // empty' 2>/dev/null || echo "")
-              fi
-              
-              if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
-                VERSION=$(skopeo inspect \
-                  --override-os linux \
-                  --override-arch ${ARCH_SUFFIX} \
-                  docker://${BAIHU_BASE}:${TAG} 2>/dev/null | \
-                  jq -r '.Labels["org.opencontainers.image.revision"] // empty' | \
-                  sed 's/refs\/heads\///' | sed 's/refs\/tags\///')
-              fi
-              
-              if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
-                VERSION="v$(date +%Y%m%d)-$(echo $DIGEST | cut -c1-7)"
-              fi
-              
-              LOCAL_DIGEST=$(skopeo inspect \
-                docker://${REGISTRY}/${IMAGE_NAME}:${TAG}-${ARCH_SUFFIX} 2>/dev/null | jq -r '.Digest // empty')
-              
-              LOCAL_VERSION=$(skopeo inspect \
-                docker://${REGISTRY}/${IMAGE_NAME}:${VERSION}-${ARCH_SUFFIX} 2>/dev/null | \
-                jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null || echo "")
-              
-              NEED_BUILD="false"
-              if [ "$DIGEST" != "$LOCAL_DIGEST" ] || [ -z "$LOCAL_DIGEST" ]; then
-                NEED_BUILD="true"
-              fi
-              
-              if [ "$VERSION" == "$LOCAL_VERSION" ] && [ -n "$LOCAL_VERSION" ]; then
-                NEED_BUILD="false"
-              fi
-              
-              echo "Tag: ${TAG}, Arch: ${ARCH}"
-              echo "Remote Digest: ${DIGEST}"
-              echo "Local Digest: ${LOCAL_DIGEST:-none}"
-              echo "Version: ${VERSION}"
-              echo "Need Build: ${NEED_BUILD}"
-              
-              MATRIX_ITEMS=$(echo "$MATRIX_ITEMS" | jq -c \
-                --arg tag "$TAG" \
-                --arg arch "$ARCH_SUFFIX" \
-                --arg version "$VERSION" \
-                --arg digest "$DIGEST" \
-                --arg need_build "$NEED_BUILD" \
-                '. + [{"tag": $tag, "arch": $arch, "version": $version, "digest": $digest, "need_build": ($need_build == "true")}]')
-              
+            echo "::group::Checking ${TAG}"
+            
+            INSPECT_OUTPUT=$(skopeo inspect docker://${BAIHU_BASE}:${TAG} 2>&1)
+            
+            if ! echo "$INSPECT_OUTPUT" | jq -e '.Digest' > /dev/null 2>&1; then
+              echo "::warning::Failed to inspect ${TAG}"
               echo "::endgroup::"
-            done
+              continue
+            fi
+            
+            DIGEST=$(echo "$INSPECT_OUTPUT" | jq -r '.Digest')
+            VERSION=$(echo "$INSPECT_OUTPUT" | jq -r '.Labels["org.opencontainers.image.version"] // .Labels["version"] // empty')
+            
+            if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
+              VERSION=$(curl -s "https://api.github.com/repos/engigu/baihu-panel/releases/latest" | jq -r '.tag_name // empty' 2>/dev/null || echo "")
+            fi
+            
+            if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
+              VERSION="v$(date +%Y%m%d)-$(echo $DIGEST | cut -c1-7)"
+            fi
+            
+            LOCAL_DIGEST=$(skopeo inspect docker://${REGISTRY}/${IMAGE_NAME}:${TAG}-amd64 2>/dev/null | jq -r '.Digest // empty' || echo "")
+            
+            NEED_BUILD="false"
+            [ "$DIGEST" != "$LOCAL_DIGEST" ] || [ -z "$LOCAL_DIGEST" ] && NEED_BUILD="true"
+            
+            echo "Tag: ${TAG}, Version: ${VERSION}, Need Build: ${NEED_BUILD}"
+            
+            MATRIX_ITEMS=$(echo "$MATRIX_ITEMS" | jq -c \
+              --arg tag "$TAG" \
+              --arg version "$VERSION" \
+              --arg digest "$DIGEST" \
+              --arg need_build "$NEED_BUILD" \
+              '. + [{"tag": $tag, "version": $version, "digest": $digest, "need_build": ($need_build == "true")}]')
+            
+            echo "::endgroup::"
           done
           
           echo "matrix=${MATRIX_ITEMS}" >> $GITHUB_OUTPUT
-          echo "Detected matrix:"
           echo "$MATRIX_ITEMS" | jq .
       
       - name: Summary
         run: |
-          echo "## Version Detection Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag | Arch | Version | Need Build |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|------|---------|------------|" >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.detect.outputs.matrix }}' | jq -r '.[] | "| \(.tag) | \(.arch) | \(.version) | \(.need_build) |"' >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | Version | Need Build |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|---------|------------|" >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.detect.outputs.matrix }}' | jq -r '.[] | "| \(.tag) | \(.version) | \(.need_build) |"' >> $GITHUB_STEP_SUMMARY
 
   build:
     needs: detect-versions
@@ -162,341 +107,100 @@ jobs:
     steps:
       - name: Skip if no build needed
         if: matrix.need_build == false
-        run: |
-          echo "::notice::No build needed for ${{ matrix.tag }} (${{ matrix.arch }})"
-          exit 0
+        run: exit 0
       
-      - name: Checkout
-        if: matrix.need_build == true
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Set up QEMU
-        if: matrix.need_build == true
-        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
       
-      - name: Set up Docker Buildx
-        if: matrix.need_build == true
-        uses: docker/setup-buildx-action@v3
-      
-      - name: Login to Registry
-        if: matrix.need_build == true
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
       
-      - name: Generate tags
-        if: matrix.need_build == true
-        id: tags
-        run: |
-          TAG="${{ matrix.tag }}"
-          ARCH="${{ matrix.arch }}"
-          VERSION="${{ matrix.version }}"
-          
-          # Rolling tag (e.g., latest-amd64)
-          TAGS="${REGISTRY}/${IMAGE_NAME}:${TAG}-${ARCH}"
-          
-          # Version tag (e.g., v1.0.45-amd64)
-          if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
-            TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:${VERSION}-${ARCH}"
-          fi
-          
-          # For amd64, also create the default tag (without arch suffix)
-          if [ "$ARCH" == "amd64" ]; then
-            TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:${TAG}"
-            if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
-              TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:${VERSION}"
-            fi
-          fi
-          
-          echo "Generated tags: ${TAGS}"
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-      
       - name: Build and push
-        if: matrix.need_build == true
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
-          platforms: linux/${{ matrix.arch }}
+          platforms: linux/amd64
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
-            BAIHU_VERSION=${{ matrix.tag }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}-amd64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-amd64
+          build-args: BAIHU_VERSION=${{ matrix.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       
       - name: Summary
-        if: matrix.need_build == true
         run: |
-          echo "## Built ${{ matrix.tag }} (${{ matrix.arch }}) ✅" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tag**: ${{ matrix.tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Arch**: ${{ matrix.arch }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version**: ${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "## Built ${{ matrix.tag }} ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
 
-  create-manifest:
-    needs: [detect-versions, build]
-    if: always() && contains(needs.detect-versions.outputs.matrix, 'true')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Login to Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
-      
-      - name: Create multi-arch manifests
-        run: |
-          MATRIX='${{ needs.detect-versions.outputs.matrix }}'
-          
-          # Get unique rolling tags (latest, latest-debian13, latest-minimal)
-          ROLLING_TAGS=$(echo "$MATRIX" | jq -r '.[].tag' | sort -u)
-          
-          # Get unique version tags
-          VERSION_TAGS=$(echo "$MATRIX" | jq -r '[.[].version] | unique | .[]' | sort -u)
-          
-          # Create manifests for rolling tags
-          for TAG in $ROLLING_TAGS; do
-            echo "Creating manifest for rolling tag: ${TAG}"
-            
-            docker buildx imagetools create -t ${REGISTRY}/${IMAGE_NAME}:${TAG} \
-              ${REGISTRY}/${IMAGE_NAME}:${TAG}-amd64 \
-              ${REGISTRY}/${IMAGE_NAME}:${TAG}-arm64 \
-              || echo "::warning::Failed to create manifest for ${TAG} (some archs may be missing)"
-            
-            echo "Created manifest: ${REGISTRY}/${IMAGE_NAME}:${TAG}"
-          done
-          
-          # Create manifests for version tags
-          for VERSION in $VERSION_TAGS; do
-            if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
-              echo "Creating manifest for version tag: ${VERSION}"
-              
-              # Find which rolling tag this version corresponds to
-              CORRESPONDING_TAG=$(echo "$MATRIX" | jq -r --arg ver "$VERSION" '.[] | select(.version == $ver) | .tag' | head -1)
-              
-              # Create version manifest using the same architecture images
-              docker buildx imagetools create -t ${REGISTRY}/${IMAGE_NAME}:${VERSION} \
-                ${REGISTRY}/${IMAGE_NAME}:${VERSION}-amd64 \
-                ${REGISTRY}/${IMAGE_NAME}:${VERSION}-arm64 \
-                || echo "::warning::Failed to create manifest for ${VERSION} (some archs may be missing)"
-              
-              echo "Created manifest: ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
-            fi
-          done
-       
-      - name: Summary
-        run: |
-          echo "## Multi-arch Manifests Created ✅" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          MATRIX='${{ needs.detect-versions.outputs.matrix }}'
-          
-          echo "### Rolling Tags" >> $GITHUB_STEP_SUMMARY
-          echo "$MATRIX" | jq -r '.[].tag' | sort -u | while read TAG; do
-            echo "- ${REGISTRY}/${IMAGE_NAME}:${TAG}" >> $GITHUB_STEP_SUMMARY
-          done
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Version Tags" >> $GITHUB_STEP_SUMMARY
-          echo "$MATRIX" | jq -r '[.[].version] | unique | .[]' | while read VERSION; do
-            if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
-              echo "- ${REGISTRY}/${IMAGE_NAME}:${VERSION}" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-
-  # Manual build for specific version (to prevent DockerHub deletion)
   manual-build:
     if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'manual' && inputs.manual_version != ''
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        variant:
-          - suffix: ''
-            tag_suffix: ''
-          - suffix: '-debian13'
-            tag_suffix: '-debian13'
-          - suffix: '-minimal'
-            tag_suffix: '-minimal'
-        arch:
-          - amd64
-          - arm64
     steps:
-      - name: Validate version input
-        run: |
-          VERSION="${{ inputs.manual_version }}"
-          
-          # Normalize version (add v prefix if missing)
-          if [[ ! "$VERSION" =~ ^v ]]; then
-            VERSION="v${VERSION}"
-          fi
-          
-          # Validate format
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            echo "::error::Invalid version format: ${VERSION}. Expected: 1.0.45 or v1.0.45"
-            exit 1
-          fi
-          
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "Building version: ${VERSION}${{ matrix.variant.suffix }} (${{ matrix.arch }})"
+      - uses: actions/checkout@v4
       
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      - name: Login to Registry
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
       
-      - name: Check upstream image exists
-        id: check
-        run: |
-          VERSION="${{ env.VERSION }}"
-          SUFFIX="${{ matrix.variant.suffix }}"
-          ARCH="${{ matrix.arch }}"
-          
-          # For base variant, use version tag directly (e.g., v1.0.45)
-          # For variants, append suffix (e.g., v1.0.45-debian13)
-          if [ -z "$SUFFIX" ]; then
-            UPSTREAM_TAG="${VERSION}"
-          else
-            UPSTREAM_TAG="${VERSION}${SUFFIX}"
-          fi
-          
-          echo "Checking upstream: ${BAIHU_BASE}:${UPSTREAM_TAG}"
-          
-          # Check if upstream tag exists
-          if skopeo inspect --override-os linux --override-arch ${ARCH} docker://${BAIHU_BASE}:${UPSTREAM_TAG} > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
-            echo "✅ Upstream image found: ${BAIHU_BASE}:${UPSTREAM_TAG}"
-          else
-            # Try with 'latest' prefix for variants (some upstream tags use latest-debian13 format)
-            ROLLING_TAG="latest${SUFFIX}"
-            if skopeo inspect --override-os linux --override-arch ${ARCH} docker://${BAIHU_BASE}:${ROLLING_TAG} > /dev/null 2>&1; then
-              echo "exists=true" >> $GITHUB_OUTPUT
-              echo "upstream_tag=${ROLLING_TAG}" >> $GITHUB_OUTPUT
-              echo "✅ Upstream image found (using rolling tag): ${BAIHU_BASE}:${ROLLING_TAG}"
-            else
-              echo "exists=false" >> $GITHUB_OUTPUT
-              echo "::warning::Upstream image not found: ${BAIHU_BASE}:${UPSTREAM_TAG} or ${BAIHU_BASE}:${ROLLING_TAG}"
-            fi
-          fi
+      - name: Login to GHCR
+        run: echo ${{ secrets.GITHUB_TOKEN }} | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
       
-      - name: Generate tags
-        if: steps.check.outputs.exists == 'true'
-        id: tags
-        run: |
-          VERSION="${{ env.VERSION }}"
-          SUFFIX="${{ matrix.variant.tag_suffix }}"
-          ARCH="${{ matrix.arch }}"
-          
-          # Build version-based tags only (NO latest tags)
-          # Format: v1.0.45-amd64, v1.0.45-debian13-amd64, v1.0.45-minimal-amd64
-          TAG="${VERSION}${SUFFIX}-${ARCH}"
-          TAGS="${REGISTRY}/${IMAGE_NAME}:${TAG}"
-          
-          # For amd64, also create tag without arch suffix
-          if [ "$ARCH" == "amd64" ]; then
-            TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:${VERSION}${SUFFIX}"
-          fi
-          
-          echo "Generated tags: ${TAGS}"
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-      
-      - name: Build and push
-        if: steps.check.outputs.exists == 'true'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/${{ matrix.arch }}
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
-            BAIHU_VERSION=${{ steps.check.outputs.upstream_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      
-      - name: Summary
-        if: steps.check.outputs.exists == 'true'
-        run: |
-          VERSION="${{ env.VERSION }}"
-          SUFFIX="${{ matrix.variant.tag_suffix }}"
-          ARCH="${{ matrix.arch }}"
-          
-          echo "## Manual Build: ${VERSION}${SUFFIX} (${ARCH}) ✅" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version**: ${VERSION}${SUFFIX}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Arch**: ${ARCH}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Upstream**: ${BAIHU_BASE}:${{ steps.check.outputs.upstream_tag }}" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Skip summary
-        if: steps.check.outputs.exists != 'true'
-        run: |
-          echo "## ⚠️ Skipped: Upstream image not found" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Could not find upstream image for version ${{ env.VERSION }}${{ matrix.variant.suffix }} (${{ matrix.arch }})" >> $GITHUB_STEP_SUMMARY
-
-  manual-manifest:
-    needs: manual-build
-    if: always() && github.event_name == 'workflow_dispatch' && inputs.build_type == 'manual'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Login to Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
-      
-      - name: Create multi-arch manifests
+      - name: Build version
+        id: version
         run: |
           VERSION="${{ inputs.manual_version }}"
-          
-          # Normalize version
-          if [[ ! "$VERSION" =~ ^v ]]; then
-            VERSION="v${VERSION}"
-          fi
-          
+          [[ ! "$VERSION" =~ ^v ]] && VERSION="v${VERSION}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building: ${VERSION}"
+      
+      - name: Build all variants
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
           VARIANTS=("" "-debian13" "-minimal")
           
           for SUFFIX in "${VARIANTS[@]}"; do
             TAG="${VERSION}${SUFFIX}"
+            UPSTREAM_TAG="${TAG}"
             
-            echo "Creating manifest for: ${TAG}"
+            echo "::group::Building ${TAG}"
             
-            docker buildx imagetools create -t ${REGISTRY}/${IMAGE_NAME}:${TAG} \
-              ${REGISTRY}/${IMAGE_NAME}:${TAG}-amd64 \
-              ${REGISTRY}/${IMAGE_NAME}:${TAG}-arm64 \
-              || echo "::warning::Failed to create manifest for ${TAG} (some archs may be missing)"
+            if skopeo inspect docker://${BAIHU_BASE}:${UPSTREAM_TAG} > /dev/null 2>&1; then
+              echo "Using upstream tag: ${UPSTREAM_TAG}"
+            elif skopeo inspect docker://${BAIHU_BASE}:latest${SUFFIX} > /dev/null 2>&1; then
+              UPSTREAM_TAG="latest${SUFFIX}"
+              echo "Using upstream tag: ${UPSTREAM_TAG}"
+            else
+              echo "::warning::Upstream not found for ${TAG}"
+              echo "::endgroup::"
+              continue
+            fi
             
-            echo "Created manifest: ${REGISTRY}/${IMAGE_NAME}:${TAG}"
+            docker buildx build \
+              --platform linux/amd64 \
+              --push \
+              -t ${REGISTRY}/${IMAGE_NAME}:${TAG} \
+              -t ${REGISTRY}/${IMAGE_NAME}:${TAG}-amd64 \
+              --build-arg BAIHU_VERSION=${UPSTREAM_TAG} \
+              .
+            
+            echo "::endgroup::"
           done
       
       - name: Summary
         run: |
-          VERSION="${{ inputs.manual_version }}"
-          if [[ ! "$VERSION" =~ ^v ]]; then
-            VERSION="v${VERSION}"
-          fi
-          
-          echo "## Manual Build Manifests Created ✅" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Version: ${VERSION}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Created Tags" >> $GITHUB_STEP_SUMMARY
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "## Manual Build ✅" >> $GITHUB_STEP_SUMMARY
           echo "- ${REGISTRY}/${IMAGE_NAME}:${VERSION}" >> $GITHUB_STEP_SUMMARY
           echo "- ${REGISTRY}/${IMAGE_NAME}:${VERSION}-debian13" >> $GITHUB_STEP_SUMMARY
           echo "- ${REGISTRY}/${IMAGE_NAME}:${VERSION}-minimal" >> $GITHUB_STEP_SUMMARY

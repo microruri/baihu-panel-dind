@@ -8,10 +8,12 @@
 docker pull microruri/baihu-panel-dind:latest
 docker pull microruri/baihu-panel-dind:latest-debian13
 docker pull microruri/baihu-panel-dind:latest-minimal
-docker pull microruri/baihu-panel-dind:v1.0.xx          # 版本标签
+docker pull microruri/baihu-panel-dind:v1.0.xx
 docker pull microruri/baihu-panel-dind:v1.0.xx-debian13
 docker pull microruri/baihu-panel-dind:v1.0.xx-minimal
 ```
+
+> 注：仅支持 amd64 架构（上游 baihu-panel 未发布 arm64 镜像）
 
 ## 快速使用
 
