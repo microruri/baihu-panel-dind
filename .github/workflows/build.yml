@@ -22,7 +22,7 @@ on:
       - main
     paths:
       - 'docker/**'
-      - 'docker-entrypoint.sh'
+      - 'entrypoint.sh'
       - '.github/workflows/build.yml'
 
 env:
@@ -86,23 +86,44 @@ jobs:
             fi
             
             if [ -z "$VERSION" ] || [ "$VERSION" == "null" ]; then
-              VERSION="v$(date +%Y%m%d)-$(echo $DIGEST | cut -c1-7)"
+              VERSION="$(date +%Y%m%d)-$(echo $DIGEST | cut -c1-7)"
             fi
+
+            VERSION_BASE="${VERSION#v}"
+            VERSION_BASE="${VERSION_BASE#V}"
+            VERSION_BASE="${VERSION_BASE%-debian13}"
+            VERSION_BASE="${VERSION_BASE%-minimal}"
+
+            case "${TAG}" in
+              latest)
+                VERSION_TAG="${VERSION_BASE}"
+                ;;
+              latest-debian13)
+                VERSION_TAG="${VERSION_BASE}-debian13"
+                ;;
+              latest-minimal)
+                VERSION_TAG="${VERSION_BASE}-minimal"
+                ;;
+              *)
+                VERSION_TAG="${VERSION_BASE}"
+                ;;
+            esac
             
-            LOCAL_DIGEST=$(skopeo inspect docker://${REGISTRY}/${IMAGE_NAME}:${TAG}-amd64 2>/dev/null | jq -r '.Digest // empty' || echo "")
+            LOCAL_DIGEST=$(skopeo inspect docker://${REGISTRY}/${IMAGE_NAME}:${TAG} 2>/dev/null | jq -r '.Digest // empty' || echo "")
             
             NEED_BUILD="false"
             [ "$DIGEST" != "$LOCAL_DIGEST" ] || [ -z "$LOCAL_DIGEST" ] && NEED_BUILD="true"
             
-            echo "Tag: ${TAG}, Version: ${VERSION}, Need Build: ${NEED_BUILD}"
+            echo "Tag: ${TAG}, VersionTag: ${VERSION_TAG}, Need Build: ${NEED_BUILD}"
             
             MATRIX_ITEMS=$(echo "$MATRIX_ITEMS" | jq -c \
               --arg tag "$TAG" \
-              --arg version "$VERSION" \
+              --arg version "$VERSION_TAG" \
+              --arg version_base "$VERSION_BASE" \
               --arg digest "$DIGEST" \
               --arg dockerfile "$DOCKERFILE" \
               --arg need_build "$NEED_BUILD" \
-              '. + [{"tag": $tag, "version": $version, "digest": $digest, "dockerfile": $dockerfile, "need_build": ($need_build == "true")}]')
+              '. + [{"tag": $tag, "version": $version, "version_base": $version_base, "digest": $digest, "dockerfile": $dockerfile, "need_build": ($need_build == "true")}]')
             
             echo "::endgroup::"
           done
@@ -144,13 +165,11 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}-amd64
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-amd64
           build-args: BAIHU_VERSION=${{ matrix.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -181,7 +200,8 @@ jobs:
         id: version
         run: |
           VERSION="${{ inputs.manual_version }}"
-          [[ ! "$VERSION" =~ ^v ]] && VERSION="v${VERSION}"
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION#V}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building: ${VERSION}"
       
@@ -192,11 +212,13 @@ jobs:
           
           for SUFFIX in "${VARIANTS[@]}"; do
             TAG="${VERSION}${SUFFIX}"
-            UPSTREAM_TAG="${TAG}"
-            
             echo "::group::Building ${TAG}"
             
-            if skopeo inspect docker://${BAIHU_BASE}:${UPSTREAM_TAG} > /dev/null 2>&1; then
+            if skopeo inspect docker://${BAIHU_BASE}:v${VERSION}${SUFFIX} > /dev/null 2>&1; then
+              UPSTREAM_TAG="v${VERSION}${SUFFIX}"
+              echo "Using upstream tag: ${UPSTREAM_TAG}"
+            elif skopeo inspect docker://${BAIHU_BASE}:${VERSION}${SUFFIX} > /dev/null 2>&1; then
+              UPSTREAM_TAG="${VERSION}${SUFFIX}"
               echo "Using upstream tag: ${UPSTREAM_TAG}"
             elif skopeo inspect docker://${BAIHU_BASE}:latest${SUFFIX} > /dev/null 2>&1; then
               UPSTREAM_TAG="latest${SUFFIX}"
@@ -225,10 +247,9 @@ jobs:
             
             docker buildx build \
               -f ${DOCKERFILE} \
-              --platform linux/amd64 \
+              --platform linux/amd64,linux/arm64 \
               --push \
               -t ${REGISTRY}/${IMAGE_NAME}:${TAG} \
-              -t ${REGISTRY}/${IMAGE_NAME}:${TAG}-amd64 \
               --build-arg BAIHU_VERSION=${UPSTREAM_TAG} \
               .
             

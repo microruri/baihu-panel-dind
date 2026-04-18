@@ -35,8 +35,8 @@ RUN set -eux; \
     apt-get clean
 
 # 创建 DinD 启动脚本
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # 创建 Docker 数据目录
 RUN mkdir -p /var/lib/docker /var/run/docker-runtime
@@ -52,4 +52,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 EXPOSE 8052
 
 # 使用自定义 entrypoint
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["entrypoint.sh"]
