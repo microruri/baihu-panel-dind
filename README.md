@@ -30,7 +30,7 @@ docker run -d \
 ## 本地构建
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/baihu-dind.git
+git clone https://github.com/microruri/baihu-panel-dind.git
 cd baihu-dind
 
 docker build -t baihu-panel-dind:local .

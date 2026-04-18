@@ -4,9 +4,9 @@
 ARG BAIHU_VERSION=latest
 FROM ghcr.io/engigu/baihu:${BAIHU_VERSION}
 
-LABEL maintainer="your-email@example.com"
+LABEL maintainer="i@microruri.com"
 LABEL description="Baihu Panel with Docker-in-Docker support"
-LABEL org.opencontainers.image.source="https://github.com/yourusername/baihu-dind"
+LABEL org.opencontainers.image.source="https://github.com/microruri/baihu-panel-dind"
 
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive
