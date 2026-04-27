@@ -24,6 +24,7 @@ docker run -d \
   -p 8052:8052 \
   -v ./data:/app/data \
   -v ./envs:/app/envs \
+  -v ./data/docker:/var/lib/docker \
   -e BAIHU_SECRET_KEY=your_secret_key \
   --restart unless-stopped \
   microruri/baihu-panel-dind:latest

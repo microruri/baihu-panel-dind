@@ -17,9 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
    && chmod a+r /etc/apt/keyrings/docker.asc \
    && case "${BAIHU_VERSION}" in \
-        *minimal*) DOCKER_SUITE="bookworm" ;; \
+        *minimal*) DOCKER_SUITE="trixie" ;; \
         *debian13*) DOCKER_SUITE="trixie" ;; \
-        *) DOCKER_SUITE="trixie" ;; \
+        *) DOCKER_SUITE="bookworm" ;; \
       esac \
    && printf "Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n" "${DOCKER_SUITE}" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.sources \
    && apt-get update \
